@@ -1,0 +1,318 @@
+/*
+ * REGULADOR DINAMICO DE PH — Projeto Final
+ * Grupo: Jose, Nathan, Pedro, Samuel e Nuno
+ *
+ * Sensores:
+ *  - Potenciometro (A0)  -> simula o sensor analogico de pH
+ *  - Fotorresistor (A1)  -> detecta escuridao para o alimentador
+ *  - HC-SR04 (10/11)     -> sensor digital de distancia
+ *
+ * Atuadores:
+ *  - Servo dosador (7), servo de alerta (6), servo alimentador (5)
+ *  - LEDs de estado (8 = acido, 9 = basico)
+ *  - Buzzer (12)
+ *
+ * Entradas do usuario:
+ *  - Botao fisico (2) -> aciona o alimentador manualmente
+ *  - Comando '1' via Serial/Bluetooth -> aciona o alimentador
+ *
+ * Ajuste de sensibilidade:
+ *  - Potenciometro (A2) -> define o limiar de luz do fotorresistor
+ */
+
+#include <Servo.h>
+#include <math.h>
+
+// ===================== NOTAS MUSICAIS (gamificacao) =====================
+#define NOTE_E7   2637
+#define NOTE_G7   3136
+#define NOTE_C7   2093
+#define NOTE_G6   1568
+#define NOTE_REST 0
+
+// ===================== PINOS =====================
+const int PINO_SERVO_DOSADOR    = 7;
+const int PINO_SERVO_ALERTA     = 6;
+const int PINO_SERVO_ALIMENTA   = 5;
+const int PINO_LED_ACIDO        = 8;
+const int PINO_LED_BASICO       = 9;
+const int PINO_ECHO             = 10;
+const int PINO_TRIG             = 11;
+const int PINO_BUZZER           = 12;
+const int PINO_BOTAO            = 2;   // NOVO: entrada fisica do usuario
+const int PINO_PH               = A0;  // potenciometro que simula o pH
+const int PINO_LDR              = A1;  // fotorresistor
+const int PINO_SENSIBILIDADE    = A2;  // NOVO: pot de ajuste do limiar do LDR
+
+// ===================== CONSTANTES =====================
+const float VELOCIDADE_PH     = 0.233; // variacao de pH por segundo na correcao
+const int   TAMANHO_FILTRO    = 5;     // janela do filtro de media movel
+const float DISTANCIA_LIMITE  = 50.0;  // cm
+
+// ===================== VARIAVEIS GLOBAIS =====================
+float distancia = 0;
+
+float vetorDistancia[TAMANHO_FILTRO];
+int   indiceDistancia = 0;
+bool  filtroDistanciaIniciado = false;
+
+float vetorPH[TAMANHO_FILTRO];
+int   indicePH = 0;
+bool  filtroPHIniciado = false;
+
+bool alimentadorAcionado = false; // trava para nao acionar repetido no escuro
+int  pontuacao = 0;               // gamificacao: correcoes de pH concluidas
+
+Servo servoDosador;
+Servo servoAlerta;
+Servo servoAlimentador;
+
+// ===================== PROTOTIPOS =====================
+float  filtrarMediaMovel(float vetor[], int &indice, bool &iniciado, float leitura);
+void   lerUltrassom();
+float  lerPHFiltrado();
+void   verificarPH(float ph);
+void   estabilizarPH(float ph);
+double calcularTempo(double pHInicial);
+double calcularPH(double pHInicial, double t);
+void   verificarAlimentadorAutomatico();
+void   verificarBotao();
+void   verificarBluetooth();
+void   acionarAlimentador();
+void   tocarMusicaVitoria();
+
+// ===================== SETUP =====================
+void setup() {
+    Serial.begin(9600); // no Tinkercad e a Serial USB; no hardware real, o HC-05 usa esta mesma Serial
+
+    servoDosador.attach(PINO_SERVO_DOSADOR);
+    servoAlerta.attach(PINO_SERVO_ALERTA);
+    servoAlimentador.attach(PINO_SERVO_ALIMENTA);
+
+    pinMode(PINO_LED_ACIDO, OUTPUT);
+    pinMode(PINO_LED_BASICO, OUTPUT);
+    pinMode(PINO_ECHO, INPUT);
+    pinMode(PINO_TRIG, OUTPUT);
+    pinMode(PINO_BUZZER, OUTPUT);
+    pinMode(PINO_BOTAO, INPUT_PULLUP); // botao entre o pino 2 e o GND
+    pinMode(PINO_LDR, INPUT);
+
+    servoDosador.write(0);
+    servoAlerta.write(0);
+    servoAlimentador.write(0);
+
+    Serial.println("Sistema de Monitoramento Iniciado...");
+    Serial.println("Envie '1' pelo Bluetooth/Serial para acionar o alimentador.");
+}
+
+// ===================== LOOP PRINCIPAL =====================
+void loop() {
+    lerUltrassom();                   // distancia com media movel
+    float ph = lerPHFiltrado();       // pH com media movel (sensor analogico)
+    verificarPH(ph);                  // corrige o pH se estiver fora da faixa
+    verificarAlimentadorAutomatico(); // alimentador automatico pelo LDR
+    verificarBotao();                 // entrada fisica do usuario
+    verificarBluetooth();             // entrada remota via smartphone
+
+    delay(200);
+}
+
+// ===================== FILTRO DE MEDIA MOVEL =====================
+// Filtro generico: na primeira leitura, preenche o vetor inteiro com o valor
+// lido para a media nao comecar "puxada" para zero.
+float filtrarMediaMovel(float vetor[], int &indice, bool &iniciado, float leitura) {
+    if (!iniciado) {
+        for (int j = 0; j < TAMANHO_FILTRO; j++) {
+            vetor[j] = leitura;
+        }
+        iniciado = true;
+    }
+
+    vetor[indice] = leitura;
+    indice++;
+    if (indice >= TAMANHO_FILTRO) {
+        indice = 0;
+    }
+
+    float soma = 0;
+    for (int j = 0; j < TAMANHO_FILTRO; j++) {
+        soma += vetor[j];
+    }
+    return soma / TAMANHO_FILTRO;
+}
+
+// ===================== SENSORES =====================
+void lerUltrassom() {
+    digitalWrite(PINO_TRIG, LOW);
+    delayMicroseconds(2);
+    digitalWrite(PINO_TRIG, HIGH);
+    delayMicroseconds(10);
+    digitalWrite(PINO_TRIG, LOW);
+
+    long duracao = pulseIn(PINO_ECHO, HIGH);
+    float leitura = duracao * 0.034 / 2; // conversao para cm
+
+    // Tratamento de sinal do sensor digital (media movel)
+    distancia = filtrarMediaMovel(vetorDistancia, indiceDistancia, filtroDistanciaIniciado, leitura);
+
+    // Alerta de distancia: buzzer + servo de alerta
+    if (distancia > DISTANCIA_LIMITE) {
+        tone(PINO_BUZZER, 440);
+        servoAlerta.write(90);
+    } else {
+        noTone(PINO_BUZZER);
+        servoAlerta.write(0);
+    }
+}
+
+float lerPHFiltrado() {
+    // Sensor analogico (potenciometro simulando sonda de pH)
+    float leitura = analogRead(PINO_PH) * 14.0 / 1023.0;
+
+    // Tratamento de sinal obrigatorio do sensor analogico (media movel)
+    return filtrarMediaMovel(vetorPH, indicePH, filtroPHIniciado, leitura);
+}
+
+// ===================== LOGICA DO PH =====================
+void verificarPH(float ph) {
+    // So corrige se o pH estiver fora da faixa segura (6.0 a 8.0)
+    // E a distancia medida for menor ou igual a DISTANCIA_LIMITE (50 cm).
+    if ((ph > 8.0 || ph < 6.0) && distancia <= DISTANCIA_LIMITE) {
+        Serial.print("ALERTA: pH fora da faixa de seguranca: ");
+        Serial.println(ph);
+        estabilizarPH(ph);
+    }
+}
+
+void estabilizarPH(float ph) {
+    servoDosador.write(90); // abre o dosador
+
+    int tempoTotal = (int)calcularTempo(ph);
+    Serial.print("Iniciando correcao automatica para ");
+    Serial.print(tempoTotal);
+    Serial.println(" segundos.");
+
+    float phAtual = ph;
+    for (int s = 1; s <= tempoTotal; s++) {
+        phAtual = calcularPH(ph, s);
+
+        Serial.print("Processando... Segundo ");
+        Serial.print(s);
+        Serial.print(": pH = ");
+        Serial.println(phAtual);
+
+        // Feedback visual: LED indica se a agua ainda esta acida ou basica
+        if (phAtual < 6.0) {
+            digitalWrite(PINO_LED_ACIDO, HIGH);
+        } else {
+            digitalWrite(PINO_LED_ACIDO, LOW);
+        }
+
+        if (phAtual > 8.0) {
+            digitalWrite(PINO_LED_BASICO, HIGH);
+        } else {
+            digitalWrite(PINO_LED_BASICO, LOW);
+        }
+
+        delay(1000);
+    }
+
+    // Ao terminar, limpa tudo
+    digitalWrite(PINO_LED_ACIDO, LOW);
+    digitalWrite(PINO_LED_BASICO, LOW);
+    servoDosador.write(0);
+
+    // Gamificacao: musica de vitoria + pontuacao acumulada
+    pontuacao++;
+    tocarMusicaVitoria();
+    Serial.println("Estabilizacao concluida. pH em 7.0");
+    Serial.print("PONTUACAO: ");
+    Serial.print(pontuacao);
+    Serial.println(" correcao(oes) concluida(s)!");
+    Serial.println("----------------------------------");
+}
+
+double calcularTempo(double pHInicial) {
+    double diferenca = fabs(pHInicial - 7.0);
+    return diferenca / VELOCIDADE_PH;
+}
+
+double calcularPH(double pHInicial, double t) {
+    double resultado;
+    if (pHInicial > 7.0) {
+        resultado = pHInicial - (VELOCIDADE_PH * t);
+        if (resultado < 7.0) {
+            resultado = 7.0;
+        }
+    } else {
+        resultado = pHInicial + (VELOCIDADE_PH * t);
+        if (resultado > 7.0) {
+            resultado = 7.0;
+        }
+    }
+    return resultado;
+}
+
+// ===================== ALIMENTADOR =====================
+void verificarAlimentadorAutomatico() {
+    int luz = analogRead(PINO_LDR);
+
+    // Ajuste de sensibilidade fisico: o potenciometro em A2 define o limiar.
+    // Girar o pot calibra em que nivel de escuridao o alimentador dispara.
+    int limiar = analogRead(PINO_SENSIBILIDADE);
+
+    if (luz <= limiar && !alimentadorAcionado) {
+        acionarAlimentador();
+        alimentadorAcionado = true;
+    }
+    if (luz > limiar) {
+        alimentadorAcionado = false;
+    }
+}
+
+void verificarBotao() {
+    // INPUT_PULLUP: o pino le LOW quando o botao esta pressionado
+    if (digitalRead(PINO_BOTAO) == LOW) {
+        Serial.println("Botao pressionado pelo usuario.");
+        acionarAlimentador();
+    }
+}
+
+void verificarBluetooth() {
+    // Requisito de conectividade: comando recebido do smartphone via HC-05.
+    // No Tinkercad, o Monitor Serial simula o app Bluetooth.
+    if (Serial.available() > 0) {
+        char comando = Serial.read();
+        if (comando == '1') {
+            Serial.println("Comando Bluetooth recebido: acionar alimentador.");
+            acionarAlimentador();
+        }
+    }
+}
+
+void acionarAlimentador() {
+    Serial.println("Acionando alimentador.");
+    servoAlimentador.write(90);
+    delay(3000);
+    servoAlimentador.write(0);
+    Serial.println("Desligando alimentador.");
+}
+
+// ===================== GAMIFICACAO =====================
+void tocarMusicaVitoria() {
+    int melodia[] = {
+        NOTE_E7, NOTE_E7, NOTE_REST, NOTE_E7, NOTE_REST, NOTE_C7,
+        NOTE_E7, NOTE_REST, NOTE_G7, NOTE_REST, NOTE_G6
+    };
+    int duracoes[] = {12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12};
+
+    for (int nota = 0; nota < 10; nota++) {
+        int duracao = 1000 / duracoes[nota];
+        tone(PINO_BUZZER, melodia[nota], duracao);
+        int pausa = duracao * 1.30;
+        delay(pausa);
+        noTone(PINO_BUZZER);
+    }
+  delay(500);
+  tone(PINO_BUZZER,melodia[10],1000/12);
+}
