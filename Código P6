@@ -1,36 +1,15 @@
-/*
- * REGULADOR DINAMICO DE PH — Projeto Final
- * Grupo: Jose, Nathan, Pedro, Samuel e Nuno
- *
- * Sensores:
- *  - Potenciometro (A0)  -> simula o sensor analogico de pH
- *  - Fotorresistor (A1)  -> detecta escuridao para o alimentador
- *  - HC-SR04 (10/11)     -> sensor digital de distancia
- *
- * Atuadores:
- *  - Servo dosador (7), servo de alerta (6), servo alimentador (5)
- *  - LEDs de estado (8 = acido, 9 = basico)
- *  - Buzzer (12)
- *
- * Entradas do usuario:
- *  - Botao fisico (2) -> aciona o alimentador manualmente
- *  - Comando '1' via Serial/Bluetooth -> aciona o alimentador
- *
- * Ajuste de sensibilidade:
- *  - Potenciometro (A2) -> define o limiar de luz do fotorresistor
- */
 
 #include <Servo.h>
 #include <math.h>
 
-// ===================== NOTAS MUSICAIS (gamificacao) =====================
+
 #define NOTE_E7   2637
 #define NOTE_G7   3136
 #define NOTE_C7   2093
 #define NOTE_G6   1568
 #define NOTE_REST 0
 
-// ===================== PINOS =====================
+
 const int PINO_SERVO_DOSADOR    = 7;
 const int PINO_SERVO_ALERTA     = 6;
 const int PINO_SERVO_ALIMENTA   = 5;
@@ -44,12 +23,11 @@ const int PINO_PH               = A0;  // potenciometro que simula o pH
 const int PINO_LDR              = A1;  // fotorresistor
 const int PINO_SENSIBILIDADE    = A2;  // NOVO: pot de ajuste do limiar do LDR
 
-// ===================== CONSTANTES =====================
 const float VELOCIDADE_PH     = 0.233; // variacao de pH por segundo na correcao
 const int   TAMANHO_FILTRO    = 5;     // janela do filtro de media movel
 const float DISTANCIA_LIMITE  = 50.0;  // cm
 
-// ===================== VARIAVEIS GLOBAIS =====================
+
 float distancia = 0;
 
 float vetorDistancia[TAMANHO_FILTRO];
@@ -67,7 +45,7 @@ Servo servoDosador;
 Servo servoAlerta;
 Servo servoAlimentador;
 
-// ===================== PROTOTIPOS =====================
+
 float  filtrarMediaMovel(float vetor[], int &indice, bool &iniciado, float leitura);
 void   lerUltrassom();
 float  lerPHFiltrado();
@@ -76,12 +54,12 @@ void   estabilizarPH(float ph);
 double calcularTempo(double pHInicial);
 double calcularPH(double pHInicial, double t);
 void   verificarAlimentadorAutomatico();
-void   verificarBotao();
+bool  verificarBotao();
 void   verificarBluetooth();
 void   acionarAlimentador();
 void   tocarMusicaVitoria();
 
-// ===================== SETUP =====================
+
 void setup() {
     Serial.begin(9600); // no Tinkercad e a Serial USB; no hardware real, o HC-05 usa esta mesma Serial
 
@@ -105,8 +83,9 @@ void setup() {
     Serial.println("Envie '1' pelo Bluetooth/Serial para acionar o alimentador.");
 }
 
-// ===================== LOOP PRINCIPAL =====================
+
 void loop() {
+  if(verificarBotao()==true){
     lerUltrassom();                   // distancia com media movel
     float ph = lerPHFiltrado();       // pH com media movel (sensor analogico)
     verificarPH(ph);                  // corrige o pH se estiver fora da faixa
@@ -115,9 +94,10 @@ void loop() {
     verificarBluetooth();             // entrada remota via smartphone
 
     delay(200);
+  }
 }
 
-// ===================== FILTRO DE MEDIA MOVEL =====================
+
 // Filtro generico: na primeira leitura, preenche o vetor inteiro com o valor
 // lido para a media nao comecar "puxada" para zero.
 float filtrarMediaMovel(float vetor[], int &indice, bool &iniciado, float leitura) {
@@ -141,7 +121,7 @@ float filtrarMediaMovel(float vetor[], int &indice, bool &iniciado, float leitur
     return soma / TAMANHO_FILTRO;
 }
 
-// ===================== SENSORES =====================
+
 void lerUltrassom() {
     digitalWrite(PINO_TRIG, LOW);
     delayMicroseconds(2);
@@ -173,7 +153,7 @@ float lerPHFiltrado() {
     return filtrarMediaMovel(vetorPH, indicePH, filtroPHIniciado, leitura);
 }
 
-// ===================== LOGICA DO PH =====================
+
 void verificarPH(float ph) {
     // So corrige se o pH estiver fora da faixa segura (6.0 a 8.0)
     // E a distancia medida for menor ou igual a DISTANCIA_LIMITE (50 cm).
@@ -253,7 +233,7 @@ double calcularPH(double pHInicial, double t) {
     return resultado;
 }
 
-// ===================== ALIMENTADOR =====================
+
 void verificarAlimentadorAutomatico() {
     int luz = analogRead(PINO_LDR);
 
@@ -270,12 +250,13 @@ void verificarAlimentadorAutomatico() {
     }
 }
 
-void verificarBotao() {
+bool verificarBotao() {
     // INPUT_PULLUP: o pino le LOW quando o botao esta pressionado
-    if (digitalRead(PINO_BOTAO) == LOW) {
+  if (digitalRead(PINO_BOTAO) == LOW){
         Serial.println("Botao pressionado pelo usuario.");
-        acionarAlimentador();
-    }
+  return true;
+  }
+  else return false;
 }
 
 void verificarBluetooth() {
@@ -298,7 +279,7 @@ void acionarAlimentador() {
     Serial.println("Desligando alimentador.");
 }
 
-// ===================== GAMIFICACAO =====================
+
 void tocarMusicaVitoria() {
     int melodia[] = {
         NOTE_E7, NOTE_E7, NOTE_REST, NOTE_E7, NOTE_REST, NOTE_C7,
